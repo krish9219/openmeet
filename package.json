@@ -1,0 +1,20 @@
+{
+  "name": "openmeet",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Open-source group video calling. A WebRTC SFU you can read.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "mediasoup": "^3.19.3",
+    "ws": "^8.20.0"
+  }
+}

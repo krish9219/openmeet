@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>openmeet — open-source group video</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="lobby">
+    <main>
+      <h1>open<span class="brand">meet</span></h1>
+      <p class="tagline">Open-source group video calling. A WebRTC SFU you can read.</p>
+
+      <form id="lobby-form">
+        <label>
+          <span>Your name</span>
+          <input id="name" placeholder="Aravind" required maxlength="40" />
+        </label>
+        <label>
+          <span>Room</span>
+          <input id="room" placeholder="team-standup" required pattern="[a-zA-Z0-9_-]+" maxlength="40" />
+        </label>
+        <button type="submit">Join room</button>
+        <button type="button" id="random-room" class="ghost">Generate random room</button>
+      </form>
+
+      <section class="features">
+        <h2>What works</h2>
+        <ul>
+          <li>Real SFU — each peer uploads once, the server fans out to everyone else.</li>
+          <li>Audio + video + screen share.</li>
+          <li>Mute, camera off, hangup.</li>
+          <li>Multiple simultaneous rooms.</li>
+          <li>Read every line of the code in an afternoon.</li>
+        </ul>
+        <h2>What doesn't (yet)</h2>
+        <ul>
+          <li>No TURN — ~15% of users behind strict NATs won't connect.</li>
+          <li>No recording, no breakout rooms, no chat.</li>
+          <li>No authentication — anyone with the URL joins.</li>
+          <li>1-on-1 quality is best; 4+ peers may drop frames on a laptop SFU.</li>
+        </ul>
+      </section>
+    </main>
+    <script>
+      const form = document.getElementById("lobby-form");
+      const nameInput = document.getElementById("name");
+      const roomInput = document.getElementById("room");
+      nameInput.value = localStorage.getItem("openmeet:name") ?? "";
+      document.getElementById("random-room").onclick = () => {
+        roomInput.value = "room-" + Math.random().toString(36).slice(2, 8);
+        roomInput.focus();
+      };
+      form.onsubmit = (e) => {
+        e.preventDefault();
+        const name = nameInput.value.trim();
+        const room = roomInput.value.trim();
+        if (!name || !room) return;
+        localStorage.setItem("openmeet:name", name);
+        location.href = `/r/${encodeURIComponent(room)}?name=${encodeURIComponent(name)}`;
+      };
+    </script>
+  </body>
+</html>

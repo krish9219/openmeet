@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>openmeet — room</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/mediasoup-client@3.7.20/lib/mediasoup-client.min.js"></script>
+  </head>
+  <body class="room">
+    <header class="bar">
+      <div class="bar-left">
+        <span class="brand-dot"></span>
+        <span class="room-name" id="room-name">…</span>
+      </div>
+      <div class="bar-right">
+        <span class="peer-count" id="peer-count">0</span>
+        <button class="copy" id="copy-link" title="Copy invite link">copy invite</button>
+      </div>
+    </header>
+
+    <main class="grid" id="grid">
+      <!-- video tiles injected here -->
+    </main>
+
+    <footer class="controls">
+      <button id="btn-mic" class="ctl on" title="Mute">🎙</button>
+      <button id="btn-cam" class="ctl on" title="Camera">📹</button>
+      <button id="btn-share" class="ctl" title="Share screen">🖥</button>
+      <button id="btn-leave" class="ctl danger" title="Leave">⏻</button>
+    </footer>
+
+    <div id="banner" class="banner" hidden></div>
+
+    <script type="module" src="/client.js"></script>
+  </body>
+</html>
