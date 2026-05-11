@@ -21,6 +21,8 @@ import {
   RTC_MIN_PORT,
   RTC_MAX_PORT,
   WEBRTC_TRANSPORT_OPTIONS,
+  ICE_SERVERS,
+  ROOM_PASSWORD,
 } from "./lib/config.js";
 import { Peer, Room } from "./lib/room.js";
 
@@ -122,6 +124,10 @@ wss.on("connection", (socket) => {
   async function handle(msg) {
     switch (msg.type) {
       case "join": {
+        if (ROOM_PASSWORD && msg.password !== ROOM_PASSWORD) {
+          reply(msg.id, { error: "Invalid room password" });
+          return;
+        }
         room = await getOrCreateRoom(msg.roomId);
         peer = new Peer(msg.displayName || "anonymous", socket);
         room.addPeer(peer);
@@ -130,8 +136,30 @@ wss.on("connection", (socket) => {
           peerId: peer.id,
           routerRtpCapabilities: room.router.rtpCapabilities,
           peers: room.snapshot(peer.id),
+          iceServers: ICE_SERVERS,
+          chatHistory: room.chatHistory,
+          authRequired: !!ROOM_PASSWORD,
         });
         broadcast("peerJoined", { peer: { id: peer.id, displayName: peer.displayName } });
+        return;
+      }
+
+      case "chat": {
+        if (!peer || !room) throw new Error("not joined");
+        const text = String(msg.text ?? "").slice(0, 2000).trim();
+        if (!text) return;
+        const entry = {
+          id: room.nextChatId++,
+          peerId: peer.id,
+          displayName: peer.displayName,
+          text,
+          at: Date.now(),
+        };
+        room.chatHistory.push(entry);
+        if (room.chatHistory.length > 200) room.chatHistory.shift();
+        for (const p of [peer, ...room.otherPeers(peer.id)]) {
+          p.socket.send(JSON.stringify({ type: "chat", ...entry }));
+        }
         return;
       }
 

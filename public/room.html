@@ -2,7 +2,8 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0a0a0a" />
     <title>openmeet — room</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
@@ -18,19 +19,41 @@
       </div>
     </header>
 
-    <main class="grid" id="grid">
-      <!-- video tiles injected here -->
-    </main>
+    <div class="stage">
+      <main class="grid" id="grid">
+        <!-- video tiles injected here -->
+      </main>
+
+      <aside class="chat-panel" id="chat-panel">
+        <div class="chat-header">
+          <span>Chat</span>
+          <button class="chat-close" id="btn-chat-close" aria-label="Close chat">✕</button>
+        </div>
+        <div class="chat-list" id="chat-list"></div>
+        <form class="chat-form" id="chat-form">
+          <input id="chat-input" placeholder="Type a message…" autocomplete="off" maxlength="2000" />
+          <button type="submit" aria-label="Send">↵</button>
+        </form>
+      </aside>
+    </div>
 
     <footer class="controls">
-      <button id="btn-mic" class="ctl on" title="Mute">🎙</button>
-      <button id="btn-cam" class="ctl on" title="Camera">📹</button>
-      <button id="btn-share" class="ctl" title="Share screen">🖥</button>
-      <button id="btn-leave" class="ctl danger" title="Leave">⏻</button>
+      <button id="btn-mic" class="ctl on" title="Mute"><span class="ctl-icon">🎙</span></button>
+      <button id="btn-cam" class="ctl on" title="Camera"><span class="ctl-icon">📹</span></button>
+      <button id="btn-share" class="ctl" title="Share screen"><span class="ctl-icon">🖥</span></button>
+      <button id="btn-chat" class="ctl" title="Chat">
+        <span class="ctl-icon">💬</span>
+        <span class="unread" id="chat-unread" hidden>1</span>
+      </button>
+      <button id="btn-breakout" class="ctl" title="Create breakout room"><span class="ctl-icon">⎙</span></button>
+      <button id="btn-leave" class="ctl danger" title="Leave"><span class="ctl-icon">⏻</span></button>
     </footer>
 
     <div id="banner" class="banner" hidden></div>
 
+    <script>
+      document.getElementById("btn-chat-close").onclick = () => document.getElementById("btn-chat").click();
+    </script>
     <script type="module" src="/client.js"></script>
   </body>
 </html>

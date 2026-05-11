@@ -1,11 +1,8 @@
 /**
- * openmeet client — drives mediasoup-client and renders the video grid.
+ * openmeet client — drives mediasoup-client and renders the video grid + chat.
  *
- * Loaded as an ES module by room.html. We import mediasoup-client via esm.sh
- * (which serves npm packages as native ESM), so no build step is needed.
- *
- * UI buttons (copy, leave, mute, camera, screen share) are wired at module
- * load — they work even if the WebSocket connection later fails.
+ * UI buttons are wired at module load so they always work; the WebSocket
+ * connection happens asynchronously and surfaces errors via the banner.
  */
 
 import * as mediasoupClient from "https://esm.sh/mediasoup-client@3";
@@ -14,16 +11,22 @@ const { Device } = mediasoupClient;
 const params = new URLSearchParams(location.search);
 const roomId = location.pathname.split("/").pop();
 const displayName = params.get("name") || "anonymous";
+const urlPassword = params.get("pwd") || "";
 
 const grid = document.getElementById("grid");
 const banner = document.getElementById("banner");
 const peerCountEl = document.getElementById("peer-count");
+const chatPanel = document.getElementById("chat-panel");
+const chatList = document.getElementById("chat-list");
+const chatInput = document.getElementById("chat-input");
+const chatForm = document.getElementById("chat-form");
+const chatToggle = document.getElementById("btn-chat");
+const chatUnread = document.getElementById("chat-unread");
 document.getElementById("room-name").textContent = roomId;
 
 const state = {
-  socket: /** @type {WebSocket | null} */ (null),
-  connected: false,
-  device: /** @type {any} */ (null),
+  socket: null,
+  device: null,
   sendTransport: null,
   recvTransport: null,
   micProducer: null,
@@ -31,10 +34,14 @@ const state = {
   screenProducer: null,
   localStream: null,
   screenStream: null,
+  peerId: null,
+  iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
   peers: new Map(),
   consumers: new Map(),
   pendingRequests: new Map(),
   nextRequestId: 1,
+  chatOpen: false,
+  unreadChat: 0,
 };
 
 function flash(text, ms = 2500, isError = false) {
@@ -45,8 +52,7 @@ function flash(text, ms = 2500, isError = false) {
   if (ms > 0) banner._t = setTimeout(() => (banner.hidden = true), ms);
 }
 
-// ============================================================ UI buttons
-// Wire these immediately so they work even if the WebSocket call fails.
+// ============================================================ UI buttons (always wired)
 
 document.getElementById("copy-link").onclick = async () => {
   const url = location.href;
@@ -54,7 +60,6 @@ document.getElementById("copy-link").onclick = async () => {
     await navigator.clipboard.writeText(url);
     flash("Link copied — share it with the other peers", 1500);
   } catch {
-    // Clipboard API may be blocked. Fall back to a manual prompt.
     window.prompt("Copy this invite URL:", url);
   }
 };
@@ -71,6 +76,10 @@ document.getElementById("btn-leave").onclick = () => {
 document.getElementById("btn-mic").onclick = () => toggleProducer("mic");
 document.getElementById("btn-cam").onclick = () => toggleProducer("cam");
 document.getElementById("btn-share").onclick = toggleScreenShare;
+document.getElementById("btn-breakout").onclick = createBreakout;
+
+chatToggle.onclick = toggleChat;
+chatForm.onsubmit = sendChat;
 
 window.addEventListener("beforeunload", () => state.socket?.close());
 
@@ -86,6 +95,11 @@ function request(type, data = {}) {
     state.pendingRequests.set(id, { resolve, reject });
     state.socket.send(JSON.stringify({ id, type, ...data }));
   });
+}
+
+function send(type, data = {}) {
+  if (!state.socket || state.socket.readyState !== WebSocket.OPEN) return;
+  state.socket.send(JSON.stringify({ type, ...data }));
 }
 
 function onSocketMessage(raw) {
@@ -107,16 +121,23 @@ function onSocketMessage(raw) {
       addPeerTile(msg.peer.id, msg.peer.displayName);
       flash(`${msg.peer.displayName} joined`);
       updatePeerCount();
+      addChatSystem(`${msg.peer.displayName} joined`);
       break;
-    case "peerLeft":
+    case "peerLeft": {
+      const left = state.peers.get(msg.peerId);
       removePeer(msg.peerId);
       updatePeerCount();
+      if (left) addChatSystem(`${left.displayName} left`);
       break;
+    }
     case "newProducer":
       consume(msg.peerId, msg.producerId, msg.kind, msg.appData);
       break;
     case "consumerClosed":
       detachConsumer(msg.consumerId);
+      break;
+    case "chat":
+      addChatMessage(msg);
       break;
   }
 }
@@ -126,20 +147,27 @@ function onSocketMessage(raw) {
 async function main() {
   state.socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}`);
   await new Promise((resolve, reject) => {
-    state.socket.addEventListener("open", () => {
-      state.connected = true;
-      resolve();
-    }, { once: true });
+    state.socket.addEventListener("open", () => resolve(), { once: true });
     state.socket.addEventListener("error", () => reject(new Error("WebSocket connection failed")), { once: true });
   });
   state.socket.addEventListener("message", onSocketMessage);
-  state.socket.addEventListener("close", () => {
-    state.connected = false;
-    flash("Disconnected from server.", 0, true);
-  });
+  state.socket.addEventListener("close", () => flash("Disconnected from server.", 0, true));
 
-  const joined = await request("join", { roomId, displayName });
+  // Try join. If server demands a password we don't have, prompt and retry.
+  let joined;
+  try {
+    joined = await request("join", { roomId, displayName, password: urlPassword });
+  } catch (e) {
+    if (/password/i.test(e.message)) {
+      const pwd = window.prompt("This room requires a password:");
+      if (!pwd) { location.href = "/"; return; }
+      joined = await request("join", { roomId, displayName, password: pwd });
+    } else {
+      throw e;
+    }
+  }
   state.peerId = joined.peerId;
+  state.iceServers = joined.iceServers ?? state.iceServers;
 
   state.device = new Device();
   await state.device.load({ routerRtpCapabilities: joined.routerRtpCapabilities });
@@ -147,12 +175,14 @@ async function main() {
   addLocalTile();
   try {
     state.localStream = await navigator.mediaDevices.getUserMedia({
-      audio: true,
-      video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
     });
   } catch (e) {
-    flash(`Mic/camera permission denied: ${e.message}. The room will still load.`, 6000, true);
+    flash(`Mic/camera permission denied: ${e.message}. Room still loads.`, 6000, true);
     state.localStream = new MediaStream();
+    document.getElementById("btn-mic").classList.remove("on");
+    document.getElementById("btn-cam").classList.remove("on");
   }
   attachStreamToTile("local", state.localStream);
 
@@ -162,16 +192,31 @@ async function main() {
   const audioTrack = state.localStream.getAudioTracks()[0];
   const videoTrack = state.localStream.getVideoTracks()[0];
   if (audioTrack) {
-    state.micProducer = await state.sendTransport.produce({ track: audioTrack, appData: { source: "mic" } });
-  } else {
-    document.getElementById("btn-mic").classList.remove("on");
+    state.micProducer = await state.sendTransport.produce({
+      track: audioTrack,
+      codecOptions: { opusStereo: true, opusDtx: true },
+      appData: { source: "mic" },
+    });
   }
   if (videoTrack) {
-    state.camProducer = await state.sendTransport.produce({ track: videoTrack, appData: { source: "cam" } });
-  } else {
-    document.getElementById("btn-cam").classList.remove("on");
+    // Simulcast: three layers so the SFU can downshift quality for distant
+    // consumers or small tiles. This is the real fix for 4+ peer quality.
+    state.camProducer = await state.sendTransport.produce({
+      track: videoTrack,
+      encodings: [
+        { rid: "r0", maxBitrate: 100_000, scaleResolutionDownBy: 4 },
+        { rid: "r1", maxBitrate: 300_000, scaleResolutionDownBy: 2 },
+        { rid: "r2", maxBitrate: 900_000, scaleResolutionDownBy: 1 },
+      ],
+      codecOptions: { videoGoogleStartBitrate: 1000 },
+      appData: { source: "cam" },
+    });
   }
 
+  // Seed chat history from server.
+  for (const entry of joined.chatHistory ?? []) addChatMessage(entry, true);
+
+  // Existing peers + their producers.
   for (const peer of joined.peers) {
     addPeerTile(peer.id, peer.displayName);
     for (const prod of peer.producers) {
@@ -179,14 +224,24 @@ async function main() {
     }
   }
   updatePeerCount();
+
+  // iOS: require a user gesture to resume audio if autoplay was blocked.
+  document.addEventListener("click", resumeAllAudio, { once: true });
+}
+
+function resumeAllAudio() {
+  document.querySelectorAll("video").forEach((v) => {
+    if (v.paused) v.play().catch(() => {});
+  });
 }
 
 async function createTransport(direction) {
   const info = await request("createTransport", { direction });
+  const opts = { ...info, iceServers: state.iceServers };
   const transport =
     direction === "send"
-      ? state.device.createSendTransport(info)
-      : state.device.createRecvTransport(info);
+      ? state.device.createSendTransport(opts)
+      : state.device.createRecvTransport(opts);
 
   transport.on("connect", async ({ dtlsParameters }, callback, errback) => {
     try {
@@ -250,9 +305,7 @@ function detachConsumer(consumerId) {
   if (!entry) return;
   const { peerId, source } = entry;
   state.consumers.delete(consumerId);
-  if (source === "screen") {
-    document.getElementById(`tile-screen-${peerId}`)?.remove();
-  }
+  if (source === "screen") document.getElementById(`tile-screen-${peerId}`)?.remove();
 }
 
 // ============================================================ DOM
@@ -306,6 +359,7 @@ function attachStreamToTile(id, stream) {
   if (!v) return;
   v.srcObject = stream;
   v._stream = stream;
+  v.play?.().catch(() => {});
 }
 
 function updatePeerCount() {
@@ -314,6 +368,60 @@ function updatePeerCount() {
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// ============================================================ chat
+
+function toggleChat() {
+  state.chatOpen = !state.chatOpen;
+  chatPanel.classList.toggle("open", state.chatOpen);
+  document.body.classList.toggle("chat-open", state.chatOpen);
+  if (state.chatOpen) {
+    state.unreadChat = 0;
+    chatUnread.hidden = true;
+    chatInput.focus();
+  }
+}
+
+function sendChat(e) {
+  e.preventDefault();
+  const text = chatInput.value.trim();
+  if (!text) return;
+  send("chat", { text });
+  chatInput.value = "";
+}
+
+function addChatMessage(msg, isHistory = false) {
+  const isOwn = msg.peerId === state.peerId;
+  const row = document.createElement("div");
+  row.className = "chat-msg" + (isOwn ? " own" : "");
+  row.innerHTML = `
+    <div class="chat-meta"><span class="chat-name">${escapeHtml(msg.displayName)}</span><span class="chat-time">${formatTime(msg.at)}</span></div>
+    <div class="chat-text">${linkifyAndEscape(msg.text)}</div>
+  `;
+  chatList.appendChild(row);
+  chatList.scrollTop = chatList.scrollHeight;
+  if (!state.chatOpen && !isOwn && !isHistory) {
+    state.unreadChat++;
+    chatUnread.textContent = String(state.unreadChat);
+    chatUnread.hidden = false;
+  }
+}
+
+function addChatSystem(text) {
+  const row = document.createElement("div");
+  row.className = "chat-msg system";
+  row.textContent = text;
+  chatList.appendChild(row);
+  chatList.scrollTop = chatList.scrollHeight;
+}
+
+function formatTime(ms) {
+  return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function linkifyAndEscape(text) {
+  return escapeHtml(text).replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
 }
 
 // ============================================================ controls
@@ -342,13 +450,15 @@ async function toggleScreenShare() {
   }
   if (state.screenProducer) {
     state.screenProducer.close();
-    try {
-      await request("closeProducer", { producerId: state.screenProducer.id });
-    } catch {}
+    try { await request("closeProducer", { producerId: state.screenProducer.id }); } catch {}
     state.screenProducer = null;
     state.screenStream?.getTracks().forEach((t) => t.stop());
     state.screenStream = null;
     btn.classList.remove("on");
+    return;
+  }
+  if (!navigator.mediaDevices?.getDisplayMedia) {
+    flash("Screen share is not supported on this browser/device.", 3000, true);
     return;
   }
   try {
@@ -360,6 +470,16 @@ async function toggleScreenShare() {
   track.onended = () => toggleScreenShare();
   state.screenProducer = await state.sendTransport.produce({ track, appData: { source: "screen" } });
   btn.classList.add("on");
+}
+
+function createBreakout() {
+  const suffix = "breakout-" + Math.random().toString(36).slice(2, 7);
+  const newRoomId = `${roomId}-${suffix}`;
+  const newUrl = `${location.origin}/r/${encodeURIComponent(newRoomId)}?name=${encodeURIComponent(displayName)}`;
+  navigator.clipboard?.writeText(newUrl).catch(() => {});
+  send("chat", { text: `Opened a breakout: ${newUrl}` });
+  flash("Breakout URL sent to chat + clipboard. Opening…", 1800);
+  setTimeout(() => (location.href = newUrl), 1800);
 }
 
 main().catch((e) => {
