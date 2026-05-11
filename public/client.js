@@ -1,20 +1,15 @@
 /**
  * openmeet client — drives mediasoup-client and renders the video grid.
  *
- * Flow:
- *   1. open WebSocket
- *   2. `join` -> server returns router RTP capabilities + list of peers already in
- *   3. create a Device, load capabilities
- *   4. createSendTransport, createRecvTransport
- *   5. get local mic + camera, produce both
- *   6. for every existing producer, send `consume` and attach the track
- *   7. on `newProducer` from anyone, consume + attach
+ * Loaded as an ES module by room.html. We import mediasoup-client via esm.sh
+ * (which serves npm packages as native ESM), so no build step is needed.
  *
- * mediasoup-client is loaded via the CDN script tag in room.html; it exposes
- * `mediasoupClient` on window.
+ * UI buttons (copy, leave, mute, camera, screen share) are wired at module
+ * load — they work even if the WebSocket connection later fails.
  */
 
-const { Device } = window.mediasoupClient;
+import * as mediasoupClient from "https://esm.sh/mediasoup-client@3";
+const { Device } = mediasoupClient;
 
 const params = new URLSearchParams(location.search);
 const roomId = location.pathname.split("/").pop();
@@ -24,15 +19,10 @@ const grid = document.getElementById("grid");
 const banner = document.getElementById("banner");
 const peerCountEl = document.getElementById("peer-count");
 document.getElementById("room-name").textContent = roomId;
-document.getElementById("copy-link").onclick = async () => {
-  try {
-    await navigator.clipboard.writeText(location.href);
-    flash("Link copied — share it with the other peers", 1500);
-  } catch {}
-};
 
 const state = {
   socket: /** @type {WebSocket | null} */ (null),
+  connected: false,
   device: /** @type {any} */ (null),
   sendTransport: null,
   recvTransport: null,
@@ -41,9 +31,7 @@ const state = {
   screenProducer: null,
   localStream: null,
   screenStream: null,
-  // peerId -> { displayName, tile element }
   peers: new Map(),
-  // consumerId -> consumer
   consumers: new Map(),
   pendingRequests: new Map(),
   nextRequestId: 1,
@@ -54,15 +42,46 @@ function flash(text, ms = 2500, isError = false) {
   banner.classList.toggle("error", isError);
   banner.hidden = false;
   clearTimeout(banner._t);
-  banner._t = setTimeout(() => (banner.hidden = true), ms);
+  if (ms > 0) banner._t = setTimeout(() => (banner.hidden = true), ms);
 }
 
-function send(type, data = {}) {
-  state.socket.send(JSON.stringify({ type, ...data }));
-}
+// ============================================================ UI buttons
+// Wire these immediately so they work even if the WebSocket call fails.
+
+document.getElementById("copy-link").onclick = async () => {
+  const url = location.href;
+  try {
+    await navigator.clipboard.writeText(url);
+    flash("Link copied — share it with the other peers", 1500);
+  } catch {
+    // Clipboard API may be blocked. Fall back to a manual prompt.
+    window.prompt("Copy this invite URL:", url);
+  }
+};
+
+document.getElementById("btn-leave").onclick = () => {
+  try {
+    state.socket?.close();
+    state.localStream?.getTracks().forEach((t) => t.stop());
+    state.screenStream?.getTracks().forEach((t) => t.stop());
+  } catch {}
+  location.href = "/";
+};
+
+document.getElementById("btn-mic").onclick = () => toggleProducer("mic");
+document.getElementById("btn-cam").onclick = () => toggleProducer("cam");
+document.getElementById("btn-share").onclick = toggleScreenShare;
+
+window.addEventListener("beforeunload", () => state.socket?.close());
+
+// ============================================================ signaling
 
 function request(type, data = {}) {
   return new Promise((resolve, reject) => {
+    if (!state.socket || state.socket.readyState !== WebSocket.OPEN) {
+      reject(new Error("not connected"));
+      return;
+    }
     const id = state.nextRequestId++;
     state.pendingRequests.set(id, { resolve, reject });
     state.socket.send(JSON.stringify({ id, type, ...data }));
@@ -70,7 +89,12 @@ function request(type, data = {}) {
 }
 
 function onSocketMessage(raw) {
-  const msg = JSON.parse(raw.data);
+  let msg;
+  try {
+    msg = JSON.parse(raw.data);
+  } catch {
+    return;
+  }
   if (msg.id && state.pendingRequests.has(msg.id)) {
     const { resolve, reject } = state.pendingRequests.get(msg.id);
     state.pendingRequests.delete(msg.id);
@@ -91,35 +115,35 @@ function onSocketMessage(raw) {
     case "newProducer":
       consume(msg.peerId, msg.producerId, msg.kind, msg.appData);
       break;
-    case "producerClosed":
-      // server doesn't tell us which consumer, but consumerClosed handles it
-      break;
     case "consumerClosed":
       detachConsumer(msg.consumerId);
       break;
   }
 }
 
-// ----------------------------------------------------------------- main
+// ============================================================ main
 
 async function main() {
   state.socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}`);
   await new Promise((resolve, reject) => {
-    state.socket.addEventListener("open", resolve, { once: true });
-    state.socket.addEventListener("error", reject, { once: true });
+    state.socket.addEventListener("open", () => {
+      state.connected = true;
+      resolve();
+    }, { once: true });
+    state.socket.addEventListener("error", () => reject(new Error("WebSocket connection failed")), { once: true });
   });
   state.socket.addEventListener("message", onSocketMessage);
-  state.socket.addEventListener("close", () => flash("Disconnected from server.", 99999, true));
+  state.socket.addEventListener("close", () => {
+    state.connected = false;
+    flash("Disconnected from server.", 0, true);
+  });
 
-  // 1. Join the room.
   const joined = await request("join", { roomId, displayName });
   state.peerId = joined.peerId;
 
-  // 2. Initialize mediasoup Device.
   state.device = new Device();
   await state.device.load({ routerRtpCapabilities: joined.routerRtpCapabilities });
 
-  // 3. Get local media (don't request before we have a place to render it).
   addLocalTile();
   try {
     state.localStream = await navigator.mediaDevices.getUserMedia({
@@ -127,26 +151,27 @@ async function main() {
       video: { width: { ideal: 1280 }, height: { ideal: 720 } },
     });
   } catch (e) {
-    flash(`Mic/camera permission denied: ${e.message}`, 6000, true);
+    flash(`Mic/camera permission denied: ${e.message}. The room will still load.`, 6000, true);
     state.localStream = new MediaStream();
   }
   attachStreamToTile("local", state.localStream);
 
-  // 4. Create both transports.
   state.sendTransport = await createTransport("send");
   state.recvTransport = await createTransport("recv");
 
-  // 5. Produce audio + video.
   const audioTrack = state.localStream.getAudioTracks()[0];
   const videoTrack = state.localStream.getVideoTracks()[0];
   if (audioTrack) {
     state.micProducer = await state.sendTransport.produce({ track: audioTrack, appData: { source: "mic" } });
+  } else {
+    document.getElementById("btn-mic").classList.remove("on");
   }
   if (videoTrack) {
     state.camProducer = await state.sendTransport.produce({ track: videoTrack, appData: { source: "cam" } });
+  } else {
+    document.getElementById("btn-cam").classList.remove("on");
   }
 
-  // 6. Consume everyone else already in the room.
   for (const peer of joined.peers) {
     addPeerTile(peer.id, peer.displayName);
     for (const prod of peer.producers) {
@@ -154,7 +179,6 @@ async function main() {
     }
   }
   updatePeerCount();
-  wireControls();
 }
 
 async function createTransport(direction) {
@@ -227,14 +251,14 @@ function detachConsumer(consumerId) {
   const { peerId, source } = entry;
   state.consumers.delete(consumerId);
   if (source === "screen") {
-    const tile = document.getElementById(`tile-screen-${peerId}`);
-    if (tile) tile.remove();
+    document.getElementById(`tile-screen-${peerId}`)?.remove();
   }
 }
 
-// ----------------------------------------------------------------- DOM
+// ============================================================ DOM
 
 function addLocalTile() {
+  if (document.getElementById("tile-local")) return;
   const tile = makeTile("local", `${displayName} (you)`);
   tile.classList.add("local");
   grid.appendChild(tile);
@@ -292,19 +316,15 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-// ----------------------------------------------------------------- controls
-
-function wireControls() {
-  document.getElementById("btn-mic").onclick = () => toggleProducer("mic");
-  document.getElementById("btn-cam").onclick = () => toggleProducer("cam");
-  document.getElementById("btn-share").onclick = toggleScreenShare;
-  document.getElementById("btn-leave").onclick = leave;
-}
+// ============================================================ controls
 
 function toggleProducer(kind) {
   const producer = kind === "mic" ? state.micProducer : state.camProducer;
   const btn = document.getElementById(kind === "mic" ? "btn-mic" : "btn-cam");
-  if (!producer) return;
+  if (!producer) {
+    flash("Still connecting — try again in a moment.", 1500);
+    return;
+  }
   if (producer.paused) {
     producer.resume();
     btn.classList.add("on");
@@ -316,9 +336,15 @@ function toggleProducer(kind) {
 
 async function toggleScreenShare() {
   const btn = document.getElementById("btn-share");
+  if (!state.sendTransport) {
+    flash("Still connecting — try again in a moment.", 1500);
+    return;
+  }
   if (state.screenProducer) {
     state.screenProducer.close();
-    await request("closeProducer", { producerId: state.screenProducer.id });
+    try {
+      await request("closeProducer", { producerId: state.screenProducer.id });
+    } catch {}
     state.screenProducer = null;
     state.screenStream?.getTracks().forEach((t) => t.stop());
     state.screenStream = null;
@@ -336,13 +362,7 @@ async function toggleScreenShare() {
   btn.classList.add("on");
 }
 
-function leave() {
-  state.socket?.close();
-  state.localStream?.getTracks().forEach((t) => t.stop());
-  state.screenStream?.getTracks().forEach((t) => t.stop());
-  location.href = "/";
-}
-
-window.addEventListener("beforeunload", () => state.socket?.close());
-
-main().catch((e) => flash(`Fatal: ${e.message}`, 99999, true));
+main().catch((e) => {
+  console.error(e);
+  flash(`Connection failed: ${e.message}`, 0, true);
+});
