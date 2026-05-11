@@ -80,8 +80,13 @@ wss.on("connection", (socket) => {
     socket.send(JSON.stringify({ type, ...data }));
   }
 
-  function reply(id, data) {
-    socket.send(JSON.stringify({ id, ...data }));
+  // Wrap responses in `{ id, result }` so inner data keys (e.g. transport.id,
+  // consumer.id) never collide with the request envelope.
+  function reply(id, result) {
+    socket.send(JSON.stringify({ id, result }));
+  }
+  function replyError(id, error) {
+    socket.send(JSON.stringify({ id, error }));
   }
 
   function broadcast(type, data) {
@@ -102,7 +107,7 @@ wss.on("connection", (socket) => {
       await handle(msg);
     } catch (e) {
       console.error(`[${peer?.id}] error handling ${msg.type}:`, e);
-      if (msg.id) reply(msg.id, { error: String(e.message || e) });
+      if (msg.id) replyError(msg.id, String(e.message || e));
     }
   });
 
@@ -125,7 +130,7 @@ wss.on("connection", (socket) => {
     switch (msg.type) {
       case "join": {
         if (ROOM_PASSWORD && msg.password !== ROOM_PASSWORD) {
-          reply(msg.id, { error: "Invalid room password" });
+          replyError(msg.id, "Invalid room password");
           return;
         }
         room = await getOrCreateRoom(msg.roomId);

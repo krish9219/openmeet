@@ -113,7 +113,7 @@ function onSocketMessage(raw) {
     const { resolve, reject } = state.pendingRequests.get(msg.id);
     state.pendingRequests.delete(msg.id);
     if (msg.error) reject(new Error(msg.error));
-    else resolve(msg);
+    else resolve(msg.result ?? {});
     return;
   }
   switch (msg.type) {
